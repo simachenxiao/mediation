@@ -79,6 +79,11 @@ const appState = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
+const fallbackParties = [
+  { name: "李江", gender: "男", id_no: "330108********2134", identity: "受害人 / 报警人", work_unit: "/", occupation: "/", home_address: "/" },
+  { name: "周枫", gender: "男", id_no: "330108********7788", identity: "嫌疑人", work_unit: "/", occupation: "/", home_address: "/" },
+];
+
 function formatChineseDate(value = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
@@ -99,6 +104,16 @@ function formatAbsoluteTime(value = Date.now()) {
     pad(date.getMonth() + 1),
     pad(date.getDate()),
   ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function getParties(caseState = appState.caseState) {
+  const parties = Array.isArray(caseState?.parties) ? caseState.parties : [];
+  return [parties[0] || fallbackParties[0], parties[1] || fallbackParties[1]];
+}
+
+function getPartyBySession(sessionKey, caseState = appState.caseState) {
+  const [partyA, partyB] = getParties(caseState);
+  return sessionKey === "b" ? partyB : partyA;
 }
 
 function buildRoundLabel(sessionKey, startedAt = null) {
@@ -236,6 +251,34 @@ function formatPartyWork(party) {
   return `${workUnit} / ${occupation}`;
 }
 
+function applyCasePartiesToUi() {
+  const [partyA, partyB] = getParties();
+  sessions.a.speaker = partyA.name || fallbackParties[0].name;
+  sessions.b.speaker = partyB.name || fallbackParties[1].name;
+  sessions.a.roundLabel = buildRoundLabel("a", appState.roundState.a.startedAt);
+  sessions.b.roundLabel = buildRoundLabel("b", appState.roundState.b.startedAt);
+
+  $$(".segment").forEach((button) => {
+    const party = getPartyBySession(button.dataset.session);
+    const label = $("span", button);
+    if (label && party?.name) label.textContent = party.name;
+  });
+
+  const demandHeaders = $$(".demand-table thead th");
+  if (demandHeaders[1]) demandHeaders[1].textContent = sessions.a.speaker;
+  if (demandHeaders[2]) demandHeaders[2].textContent = sessions.b.speaker;
+
+  const signBoxes = $$(".sign-box");
+  if (signBoxes[0]) {
+    signBoxes[0].dataset.signer = `${sessions.a.speaker}签名`;
+    $("span", signBoxes[0]).textContent = `${sessions.a.speaker}签名`;
+  }
+  if (signBoxes[1]) {
+    signBoxes[1].dataset.signer = `${sessions.b.speaker}签名`;
+    $("span", signBoxes[1]).textContent = `${sessions.b.speaker}签名`;
+  }
+}
+
 function normalizeDraftClauses(content) {
   const clauses = Array.isArray(content?.clauses) ? content.clauses : [];
   return clauses.map((clause) => {
@@ -322,9 +365,7 @@ function collectRecordRounds() {
 }
 
 function renderAgreementDraft(content = {}, caseState = {}) {
-  const parties = Array.isArray(caseState.parties) ? caseState.parties : [];
-  const partyA = parties[0] || { name: "李江", gender: "男", id_no: "330108********2134", work_unit: "/", occupation: "/", home_address: "/" };
-  const partyB = parties[1] || { name: "周枫", gender: "男", id_no: "330108********7788", work_unit: "/", occupation: "/", home_address: "/" };
+  const [partyA, partyB] = getParties(caseState);
   const illegalFact = caseState.illegal_fact || $(".case-brief-grid .wide b")?.textContent?.trim() || "待根据案件基本信息生成。";
   const clauses = normalizeDraftClauses(content);
   const clauseHtml = clauses
@@ -1095,11 +1136,12 @@ function setWorkflow(index) {
 function renderVoiceSummary(sessionKey) {
   const session = sessions[sessionKey];
   const state = appState.roundState[sessionKey];
+  const party = getPartyBySession(sessionKey);
 
-  $("#party-name").textContent = sessionKey === "b" ? "周枫" : "李江";
-  $("#party-gender").textContent = "男";
-  $("#party-id").textContent = sessionKey === "b" ? "330108********7788" : "330108********2134";
-  $("#party-identity").textContent = sessionKey === "b" ? "嫌疑人" : "受害人 / 报警人";
+  $("#party-name").textContent = party?.name || session.speaker || "/";
+  $("#party-gender").textContent = party?.gender || "/";
+  $("#party-id").textContent = party?.id_no || "/";
+  $("#party-identity").textContent = party?.identity || party?.role || "/";
   $("#speaker-state-main").textContent = "说话人分离：已关闭";
 
   $("#round-current").textContent = `${session.roundLabel} · ${state.running ? "录音中" : (state.stopped ? "已结束" : "待开始")}`;
@@ -1423,7 +1465,9 @@ function bindEvents() {
   }, 1000);
 }
 
-function init() {
+async function init() {
+  await getCaseState();
+  applyCasePartiesToUi();
   renderAgreementDraft({}, appState.caseState || {});
   clearSignaturePad();
   bindEvents();
