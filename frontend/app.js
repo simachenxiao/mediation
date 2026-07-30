@@ -377,7 +377,6 @@ function renderAgreementDraft(content = {}, caseState = {}) {
     <article class="official-document">
       <h3>现场治安调解协调书</h3>
       <section class="doc-section">
-        <p class="doc-section-title">人员基本信息</p>
         <p>当事人：${escapeHTML(partyA.name)}　性别：${escapeHTML(partyA.gender)}　身份证及号码：${escapeHTML(partyA.id_no || "/")}</p>
         <p>工作单位及职业：${escapeHTML(formatPartyWork(partyA))}</p>
         <p>家庭地址：${escapeHTML(partyA.home_address || "/")}</p>
