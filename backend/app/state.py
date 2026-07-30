@@ -15,9 +15,9 @@ def build_case_state() -> CaseState:
             id_no="330108********2134",
             identity="\u62a5\u6848\u4eba / \u53d7\u5bb3\u4eba",
             phone="13800001111",
-            work_unit="/",
+            work_unit="电瓶车店老板",
             occupation="/",
-            home_address="/",
+            home_address="杭州市上城区景芳街道96号XX小区1幢1单元101室",
         ),
         Party(
             id=new_id("party"),
@@ -27,9 +27,9 @@ def build_case_state() -> CaseState:
             id_no="330108********7788",
             identity="\u5acc\u7591\u4eba",
             phone="13900002222",
-            work_unit="/",
+            work_unit="外卖员",
             occupation="/",
-            home_address="/",
+            home_address="杭州市上城区望江街道望江小区11幢1单元1101室",
         ),
     ]
 
