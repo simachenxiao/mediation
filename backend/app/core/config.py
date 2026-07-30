@@ -15,7 +15,7 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 
 class Settings:
-    app_name: str = os.getenv("APP_NAME", "mediation")  # 所有外部依赖都从环境变量读取。
+    app_name: str = os.getenv("APP_NAME", "mediation")
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
 
@@ -27,17 +27,17 @@ class Settings:
     asr_provider: str = os.getenv("ASR_PROVIDER", "tencent")
     realtime_asr_simulation: bool = _env_bool("REALTIME_ASR_SIMULATION")
     realtime_asr_simulation_interval_ms: int = int(os.getenv("REALTIME_ASR_SIMULATION_INTERVAL_MS", "900"))
+
     tencent_asr_appid: str = os.getenv("TENCENT_ASR_APPID", "1300915009")
     tencent_asr_secret_id: str = os.getenv("TENCENT_ASR_SECRET_ID", "")
     tencent_asr_secret_key: str = os.getenv("TENCENT_ASR_SECRET_KEY", "")
-    # 腾讯云实时语音识别 V2 的话者分离配置，按需在 .env 中打开或关闭。
-    tencent_asr_speaker_diarization: bool = _env_bool("TENCENT_ASR_SPEAKER_DIARIZATION")
+    tencent_asr_engine_model_type: str = os.getenv("TENCENT_ASR_ENGINE_MODEL_TYPE", "16k_zh")
+    # 腾讯云实时语音识别 V2 的说话人分离配置；模型名包含 speaker 时自动开启对应参数。
+    tencent_asr_speaker_diarization: bool = (
+        _env_bool("TENCENT_ASR_SPEAKER_DIARIZATION") or "speaker" in tencent_asr_engine_model_type
+    )
     tencent_asr_enable_speaker_context: bool = _env_bool("TENCENT_ASR_ENABLE_SPEAKER_CONTEXT")
     tencent_asr_speaker_context_id: str = os.getenv("TENCENT_ASR_SPEAKER_CONTEXT_ID", "")
-    tencent_asr_engine_model_type: str = os.getenv(
-        "TENCENT_ASR_ENGINE_MODEL_TYPE",
-        "16k_zh_en_speaker_2.0" if tencent_asr_speaker_diarization else "16k_zh",
-    )
 
     frontend_dir: Path = BASE_DIR.parent / "frontend"
 

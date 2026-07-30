@@ -1144,6 +1144,22 @@ mark {
   border-bottom-left-radius: 4px;
 }
 
+.statement-chat-list .utterance.speaker-pending {
+  margin-right: auto;
+  margin-left: 0;
+  color: #64748b;
+  background: #f8fafc;
+  border-left: 4px solid #cbd5e1;
+}
+
+.statement-chat-list .utterance.speaker-unknown {
+  margin-right: auto;
+  margin-left: 0;
+  color: var(--ink);
+  background: #f8fafc;
+  border-left: 4px solid var(--line);
+}
+
 .statement-chat-list .utterance.speaker-1 {
   margin-right: auto;
   margin-left: 0;

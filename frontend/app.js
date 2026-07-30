@@ -36,6 +36,7 @@ const appState = {
   currentSigner: null,
   currentAnalysis: null,
   caseState: null,
+  publicConfig: {},
   // 诉求重新提取后，旧的一致性结论先标记为待刷新，避免页面在同一人二次提取时反复套用旧状态。
   analysisDirty: false,
   extractingDemand: false,
@@ -64,6 +65,7 @@ const appState = {
     audioData: null,
     meterAnimation: null,
     audioLevel: 0,
+    maxAudioLevel: 0,
     processor: null,
     closing: false,
     reconnectAttempts: 0,
@@ -198,9 +200,11 @@ async function readJsonResponse(response, fallbackMessage) {
 
 async function getPublicConfig() {
   try {
-    return await fetch("/api/config").then((response) => response.json());
+    const payload = await fetch("/api/config").then((response) => response.json());
+    appState.publicConfig = payload;
+    return payload;
   } catch (error) {
-    return {};
+    return appState.publicConfig || {};
   }
 }
 
@@ -212,6 +216,14 @@ async function getCaseState() {
   } catch (error) {
     return appState.caseState || {};
   }
+}
+
+function reportAsrDebug(event, payload = {}) {
+  fetch("/api/asr/debug", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event, payload }),
+  }).catch(() => {});
 }
 
 function collectDemandRowsForDraft() {
@@ -599,7 +611,10 @@ function scrollStatementChatToBottom() {
 function resolveSpeakerMeta(sessionKey, speakerId) {
   const numericSpeakerId = Number(speakerId);
   if (!Number.isFinite(numericSpeakerId) || numericSpeakerId < 0) {
-    return { label: sessions[sessionKey].speaker, speakerClass: "party-a" };
+    if (appState.publicConfig?.tencent_asr_speaker_diarization) {
+      return { label: "说话人识别中", speakerClass: "speaker-pending" };
+    }
+    return { label: "发言人", speakerClass: "speaker-unknown" };
   }
 
   const runtime = currentRuntime(sessionKey);
@@ -845,7 +860,7 @@ function appendAsrSentence(payload) {
   const sessionKey = appState.currentSession;
   const runtime = currentRuntime(sessionKey);
   const id = payload.sentence_id ?? `sentence-${Date.now()}-${runtime.transcript.length}`;
-  const existing = runtime.transcript.find((item) => item.id === id && !item.isFinal);
+  const existing = runtime.transcript.find((item) => item.id === id);
   const speakerMeta = resolveSpeakerMeta(sessionKey, payload.speaker_id);
   const speaker = payload.speaker || speakerMeta.label;
   const role = payload.role || (Number(payload.speaker_id) >= 0 ? "speaker" : classifyUtteranceRole(text, sessionKey));
@@ -853,6 +868,11 @@ function appendAsrSentence(payload) {
   if (existing) {
     existing.text = text;
     existing.isFinal = Boolean(payload.is_final);
+    if (payload.speaker || Number(payload.speaker_id) >= 0) {
+      existing.speaker = speaker;
+      existing.role = role;
+      existing.speakerClass = speakerMeta.speakerClass;
+    }
   } else {
     runtime.transcript.push({
       id,
@@ -921,6 +941,7 @@ function stopAudioMeter() {
     appState.asr.meterAnimation = null;
   }
   appState.asr.audioLevel = 0;
+  appState.asr.maxAudioLevel = 0;
   updateAudioMeter(0, false);
 }
 
@@ -936,6 +957,7 @@ function startAudioMeter(analyser, audioData) {
     }
     const rms = Math.sqrt(sum / audioData.length);
     appState.asr.audioLevel = Math.min(1, rms * 8);
+    appState.asr.maxAudioLevel = Math.max(appState.asr.maxAudioLevel || 0, appState.asr.audioLevel);
     updateAudioMeter(appState.asr.audioLevel, true);
     appState.asr.meterAnimation = window.requestAnimationFrame(tick);
   };
@@ -959,6 +981,7 @@ async function startRealtimeAsr() {
       appState.asr.reconnectAttempts = 0;
       appendAsrSentence(payload);
     }
+    if (payload.type === "error") reportAsrDebug("browser_error", { message: payload.message || "", code: payload.code || 0 });
     if (payload.type === "error" && !appState.asr.closing) handleAsrFailure(payload.message || "服务连接异常");
   });
 
@@ -1040,8 +1063,18 @@ async function stopRealtimeAsr(sendEnd = true) {
   if (stream) stream.getTracks().forEach((track) => track.stop());
   if (context && context.state !== "closed") await context.close();
   if (socket && socket.readyState === WebSocket.OPEN) {
-    if (sendEnd) socket.send(JSON.stringify({ type: "end" }));
-    window.setTimeout(() => socket.close(), 600);
+    if (sendEnd) {
+      reportAsrDebug("stop", {
+        max_audio_level: Number((appState.asr.maxAudioLevel || 0).toFixed(4)),
+        socket_ready_state: socket.readyState,
+      });
+      socket.send(JSON.stringify({ type: "end" }));
+      window.setTimeout(() => {
+        if (socket.readyState === WebSocket.OPEN) socket.close();
+      }, 10000);
+    } else {
+      socket.close();
+    }
   }
   Object.assign(appState.asr, { socket: null, stream: null, context: null, source: null, analyser: null, audioData: null, processor: null });
   window.setTimeout(() => {

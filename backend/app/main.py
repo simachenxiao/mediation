@@ -19,7 +19,7 @@ from .core.config import get_settings
 from .models import Utterance, new_id, now_iso
 from .services.documents import make_document, render_document_text, touch_document
 from .services.llm import LLMService
-from .services.tencent_asr import get_asr_provider
+from .services.tencent_asr import DEBUG_LOG_PATH, get_asr_provider, write_asr_debug
 from .state import CASE_STATE, audit
 
 
@@ -38,6 +38,9 @@ app.mount("/assets", StaticFiles(directory=frontend_dir / "assets"), name="asset
 
 llm = LLMService()
 asr = get_asr_provider()
+
+TENCENT_PCM_CHUNK_BYTES = 1280
+TENCENT_PCM_CHUNK_INTERVAL_SECONDS = 0.04
 
 
 SIMULATED_REALTIME_SCRIPTS: dict[str, list[list[dict[str, str]]]] = {
@@ -113,6 +116,11 @@ class UtteranceRequest(BaseModel):
     text: str
 
 
+class ASRClientDebugRequest(BaseModel):
+    event: str
+    payload: dict[str, Any] = {}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     """直接返回前端原型页面。"""
@@ -131,7 +139,29 @@ def get_public_config() -> dict[str, Any]:
     return {
         "realtime_asr_simulation": settings.realtime_asr_simulation,
         "realtime_asr_simulation_sequence": SIMULATED_REALTIME_SEQUENCE,
+        "tencent_asr_speaker_diarization": settings.tencent_asr_speaker_diarization,
+        "tencent_asr_engine_model_type": settings.tencent_asr_engine_model_type,
     }
+
+
+@app.get("/api/asr/debug")
+def get_asr_debug() -> dict[str, Any]:
+    """读取最近的 ASR 脱敏调试日志，便于定位是否收到音频和腾讯返回。"""
+    if not DEBUG_LOG_PATH.exists():
+        return {"items": []}
+    lines = DEBUG_LOG_PATH.read_text(encoding="utf-8").splitlines()[-80:]
+    items = []
+    for line in lines:
+        with contextlib.suppress(json.JSONDecodeError):
+            items.append(json.loads(line))
+    return {"items": items}
+
+
+@app.post("/api/asr/debug")
+def add_asr_debug(req: ASRClientDebugRequest) -> dict[str, Any]:
+    """接收前端 ASR 调试信息，例如浏览器侧音量和 WebSocket 状态。"""
+    write_asr_debug(f"client_{req.event}", req.payload)
+    return {"ok": True}
 
 
 @app.post("/api/asr/transcribe")
@@ -162,6 +192,14 @@ async def realtime_asr(websocket: WebSocket) -> None:
 
     try:
         tencent_url = asr.signed_stream_url()
+        write_asr_debug(
+            "connect_start",
+            {
+                "engine_model_type": settings.tencent_asr_engine_model_type,
+                "speaker_diarization": settings.tencent_asr_speaker_diarization,
+                "speaker_context": settings.tencent_asr_enable_speaker_context,
+            },
+        )
     except RuntimeError as exc:
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1011, reason="asr config error")
@@ -171,21 +209,67 @@ async def realtime_asr(websocket: WebSocket) -> None:
         async with websockets.connect(tencent_url, ping_interval=None, max_size=None) as tencent_ws:
             # 腾讯云连接成功后会先返回握手状态，规整后通知前端。
             hello = asr.normalize_message(await tencent_ws.recv())
+            write_asr_debug("upstream_hello", {"type": hello.get("type"), "code": hello.get("code"), "message": hello.get("message")})
             if hello.get("type") == "error":
                 await websocket.send_json(hello)
                 await websocket.close(code=1000)
                 return
             await websocket.send_json({"type": "status", "message": hello.get("message") or "ASR connected"})
 
+            final_result_received = asyncio.Event()
+            audio_buffer = bytearray()
+            audio_stats = {"browser_bytes": 0, "upstream_chunks": 0, "upstream_bytes": 0, "sentences": 0, "statuses": 0}
+
+            async def send_pcm_to_tencent(data: bytes, *, flush: bool = False) -> None:
+                """按腾讯云建议的 16k PCM 40ms/1280 字节节奏转发音频，避免上游因包过大不出结果。"""
+                audio_stats["browser_bytes"] += len(data)
+                audio_buffer.extend(data)
+                while len(audio_buffer) >= TENCENT_PCM_CHUNK_BYTES:
+                    chunk = bytes(audio_buffer[:TENCENT_PCM_CHUNK_BYTES])
+                    del audio_buffer[:TENCENT_PCM_CHUNK_BYTES]
+                    await tencent_ws.send(chunk)
+                    audio_stats["upstream_chunks"] += 1
+                    audio_stats["upstream_bytes"] += len(chunk)
+                    await asyncio.sleep(TENCENT_PCM_CHUNK_INTERVAL_SECONDS)
+                if flush and audio_buffer:
+                    chunk = bytes(audio_buffer)
+                    await tencent_ws.send(chunk)
+                    audio_stats["upstream_chunks"] += 1
+                    audio_stats["upstream_bytes"] += len(chunk)
+                    audio_buffer.clear()
+
             async def forward_tencent_result() -> None:
                 try:
                     async for raw_message in tencent_ws:
-                        payload = asr.normalize_message(raw_message)
-                        await websocket.send_json(payload)
-                        if payload.get("type") == "error":
+                        should_stop = False
+                        for payload in asr.normalize_messages(raw_message):
+                            if payload.get("type") == "sentence":
+                                audio_stats["sentences"] += 1
+                            else:
+                                audio_stats["statuses"] += 1
+                            raw_payload = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+                            write_asr_debug(
+                                "upstream_message",
+                                {
+                                    "type": payload.get("type"),
+                                    "code": payload.get("code"),
+                                    "message": payload.get("message"),
+                                    "has_text": bool(payload.get("text")),
+                                    "speaker_id": payload.get("speaker_id"),
+                                    "is_final": payload.get("is_final"),
+                                    "stream_final": payload.get("stream_final"),
+                                    "raw_keys": sorted(raw_payload.keys()),
+                                },
+                            )
+                            await websocket.send_json(payload)
+                            if payload.get("type") == "error" or payload.get("stream_final"):
+                                should_stop = True
+                        if should_stop:
                             break
                 except websockets.ConnectionClosed:
                     pass
+                finally:
+                    final_result_received.set()
 
             forward_task = asyncio.create_task(forward_tencent_result())
             try:
@@ -194,17 +278,22 @@ async def realtime_asr(websocket: WebSocket) -> None:
                     if message.get("type") == "websocket.disconnect":
                         break
                     if message.get("bytes") is not None:
-                        await tencent_ws.send(message["bytes"])
+                        await send_pcm_to_tencent(message["bytes"])
                     elif message.get("text"):
                         payload = json.loads(message["text"])
                         if payload.get("type") == "end":
                             with contextlib.suppress(Exception):
+                                await send_pcm_to_tencent(b"", flush=True)
                                 await tencent_ws.send(json.dumps({"type": "end"}, ensure_ascii=False))
+                            with contextlib.suppress(asyncio.TimeoutError):
+                                await asyncio.wait_for(final_result_received.wait(), timeout=8)
                             break
             finally:
-                forward_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await forward_task
+                if not forward_task.done():
+                    forward_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forward_task
+                write_asr_debug("stream_closed", audio_stats)
                 audit("system", "realtime_asr", "session", "stream closed")
                 with contextlib.suppress(Exception):
                     await websocket.close(code=1000)
