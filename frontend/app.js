@@ -245,10 +245,10 @@ function hasBothPartyDemands(rows) {
 }
 
 function formatPartyWork(party) {
-  const workUnit = party?.work_unit || "/";
-  const occupation = party?.occupation || "/";
-  if (workUnit === "/" && occupation === "/") return "/";
-  return `${workUnit} / ${occupation}`;
+  const values = [party?.work_unit, party?.occupation]
+    .map((value) => String(value || "").trim())
+    .filter((value) => value && value !== "/" && value !== "未知");
+  return values.length ? values.join(" / ") : "/";
 }
 
 function applyCasePartiesToUi() {
