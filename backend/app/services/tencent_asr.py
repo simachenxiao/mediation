@@ -54,6 +54,10 @@ class TencentASRProvider:
         }
         if self.settings.tencent_asr_speaker_diarization:
             params["speaker_diarization"] = 1
+            if self.settings.tencent_asr_enable_speaker_context:
+                params["enable_speaker_context"] = 1
+            if self.settings.tencent_asr_speaker_context_id:
+                params["speaker_context_id"] = self.settings.tencent_asr_speaker_context_id
         sign_str = "&".join(f"{k}={params[k]}" for k in sorted(params))
         # 按腾讯云实时语音识别 V2 规则，签名原文不包含 wss:// 协议头。
         sign_str = f"asr.cloud.tencent.com/asr/v2/{appid}?{sign_str}"
