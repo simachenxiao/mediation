@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>智能调解助手</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b82f6'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-size='16' fill='white' font-family='Arial'%3E调%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/assets/lucide.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body class="mediation-app" data-page="voice">
+  <div class="app-shell">
+    <main class="main">
+      <!-- 当前原型只保留会谈工作台和文书签署，移除旧版导航、状态条和隐藏页面。 -->
+      <h1 class="workspace-title">智能调解助手</h1>
+      <section class="page active" id="page-voice">
+        <div class="mediation-workspace">
+          <article class="panel statement-chat mediation-chat-card">
+            <div class="session-switch chat-session-tabs" aria-label="选择会谈人员">
+              <button class="segment active" data-session="a"><i data-lucide="user-round"></i><span>李江</span></button>
+              <button class="segment" data-session="b"><i data-lucide="user-round"></i><span>周枫</span></button>
+            </div>
+
+            <div class="mediation-card-head">
+              <div>
+                <h2>调解会谈</h2>
+                <p id="round-current">李江第 1 轮 · 待开始</p>
+                <span class="hidden-status" id="round-current-hint">点击开始后进入实时转写，本轮结束后再生成诉求。</span>
+              </div>
+            </div>
+
+            <div class="statement-chat-body">
+              <div class="utterances dialog-lanes statement-chat-list" id="utterances"></div>
+            </div>
+
+            <div class="meeting-player" id="meeting-player">
+              <div class="meeting-toolbar">
+                <button class="record-toggle" data-control="pause" aria-label="开始本轮"><i data-lucide="play"></i><span id="record-toggle-label">开始本轮</span></button>
+                <button class="record-stop" data-control="stop" aria-label="停止会谈"><i data-lucide="square-stop"></i><span>停止</span></button>
+              </div>
+              <div class="voice-wave-wrap" aria-label="收音波形">
+                <span class="voice-dot"></span>
+                <div class="voice-wave" id="voice-wave" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <b id="audio-level-text">收音待开始</b>
+              </div>
+              <div class="player-status">
+                <span class="statement-time" id="session-timer">00:00:00</span>
+                <span id="record-status">待开始</span>
+              </div>
+            </div>
+          </article>
+
+          <aside class="mediation-side">
+            <article class="panel case-brief-card">
+              <div class="panel-head">
+                <h2><i data-lucide="folder-check"></i><span>案件基本信息</span></h2>
+              </div>
+              <div class="case-brief-grid">
+                <div><span>案件编号</span><b>A20260722-016</b></div>
+                <div><span>案由</span><b>殴打他人</b></div>
+                <div class="wide"><span>违法事实</span><b>2026 年 07 月 22 日 16 时 30 分许，在杭州市滨江区江陵路 21 号万事达电动车修理店内，周枫因电动车维修争议持金属扳手击打李江头部，致李江头皮挫裂伤，经鉴定为轻微伤。</b></div>
+              </div>
+            </article>
+
+            <article class="panel party-info-card">
+              <div class="panel-head">
+                <h2><i data-lucide="user-round-check"></i><span>人员信息</span></h2>
+              </div>
+              <div class="party-info-body">
+                <div>
+                  <span>姓名</span>
+                  <b id="party-name">李江</b>
+                </div>
+                <div>
+                  <span>性别</span>
+                  <b id="party-gender">男</b>
+                </div>
+                <div>
+                  <span>证件号</span>
+                  <b id="party-id">330108********2134</b>
+                </div>
+                <div>
+                  <span>身份</span>
+                  <b id="party-identity">受害人 / 报警人</b>
+                </div>
+              </div>
+              <span class="hidden-status" id="speaker-state-main">说话人分离：已关闭</span>
+            </article>
+
+            <article class="panel demand-compare-card">
+              <div class="panel-head">
+                <h2><i data-lucide="table-properties"></i><span>诉求对照</span></h2>
+              </div>
+              <table class="demand-table" aria-label="诉求对照表">
+                <thead>
+                  <tr><th>事项</th><th>李江</th><th>周枫</th><th>状态</th></tr>
+                </thead>
+                <tbody id="live-compare-body"></tbody>
+              </table>
+              <div class="decision-next">
+                <i data-lucide="corner-down-right"></i>
+                <span id="decision-next-text"></span>
+              </div>
+            </article>
+
+            <article class="panel final-action-card">
+              <button class="primary-button wide js-joint"><i data-lucide="file-pen-line"></i><span>生成协议</span></button>
+              <button class="text-danger-button js-failed-record"><i data-lucide="file-x-2"></i><span>调解不成</span></button>
+            </article>
+          </aside>
+        </div>
+      </section>
+
+      <section class="page" id="page-document">
+        <div class="document-actionbar">
+          <button class="secondary-button js-back-voice"><i data-lucide="arrow-left"></i><span>返回会谈</span></button>
+        </div>
+        <div class="document-layout simple-document-layout">
+          <article class="panel editor-panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="document-title">调解协议书</h2>
+              </div>
+              <div class="toolbar">
+                <button class="secondary-button js-edit-document"><i data-lucide="file-pen-line"></i><span>编辑文本</span></button>
+                <button class="icon-button js-redraft" aria-label="重新生成"><i data-lucide="rotate-cw"></i></button>
+              </div>
+            </div>
+            <div class="document-paper agreement-paper" id="document-paper"></div>
+          </article>
+
+          <article class="panel source-panel signature-workbench" id="signature-workbench">
+            <div class="panel-head">
+              <h2>签名确认</h2>
+              <span class="tag amber" id="sign-status">待签署</span>
+            </div>
+            <div class="sign-grid">
+              <div class="sign-box" role="button" tabindex="0" data-signer="李江签名"><i data-lucide="pen-line"></i><span>李江签名</span><b>未签</b></div>
+              <div class="sign-box" role="button" tabindex="0" data-signer="周枫签名"><i data-lucide="pen-line"></i><span>周枫签名</span><b>未签</b></div>
+              <div class="sign-box" role="button" tabindex="0" data-signer="民警确认"><i data-lucide="stamp"></i><span>民警确认</span><b>待确认</b></div>
+            </div>
+            <div class="button-row">
+              <button class="primary-button wide js-complete-sign"><i data-lucide="badge-check"></i><span>完成签署</span></button>
+              <button class="secondary-button wide js-print"><i data-lucide="printer"></i><span>打印文书</span></button>
+            </div>
+            <span class="tag amber hidden-status" id="archive-ai-status">待完成</span>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="demand-extract-modal" id="demand-extract-modal" aria-hidden="true">
+    <section class="demand-extract-panel" role="status" aria-live="polite">
+      <span class="extract-spinner"></span>
+      <b id="demand-extract-text">诉求提取中</b>
+    </section>
+  </div>
+
+  <div class="analysis-modal" id="analysis-modal" aria-hidden="true">
+    <section class="analysis-panel" role="status" aria-live="polite">
+      <span class="analysis-spinner"></span>
+      <b id="analysis-text">一致性分析中</b>
+    </section>
+  </div>
+
+  <div class="modal" id="signature-modal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="signature-title">
+      <div class="panel-head">
+        <h2 id="signature-title">采集签名</h2>
+        <button class="icon-button" data-close-modal aria-label="关闭"><i data-lucide="x"></i></button>
+      </div>
+      <canvas id="signature-pad" width="560" height="220"></canvas>
+      <div class="modal-actions">
+        <button class="secondary-button" id="clear-signature"><i data-lucide="eraser"></i><span>清除</span></button>
+        <button class="primary-button" id="save-signature"><i data-lucide="check"></i><span>确认采集</span></button>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

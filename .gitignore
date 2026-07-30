@@ -1,0 +1,29 @@
+# 本地环境变量和密钥
+.env
+.env.*
+!.env.example
+
+# Python 虚拟环境与缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 运行期数据和日志
+backend/data/
+*.log
+
+# 前端依赖与构建产物
+node_modules/
+dist/
+build/
+
+# 本地调试截图
+frontend/*.png
+
+# 编辑器和系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
