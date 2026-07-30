@@ -365,6 +365,8 @@ function collectRecordRounds() {
 }
 
 function renderAgreementDraft(content = {}, caseState = {}) {
+  $("#document-paper").classList.add("a4-paper", "agreement-paper");
+  $("#document-paper").classList.remove("record-paper");
   const [partyA, partyB] = getParties(caseState);
   const illegalFact = caseState.illegal_fact || $(".case-brief-grid .wide b")?.textContent?.trim() || "待根据案件基本信息生成。";
   const clauses = normalizeDraftClauses(content);
@@ -404,6 +406,8 @@ function renderAgreementDraft(content = {}, caseState = {}) {
 }
 
 function renderRecordDraft(content = {}, caseState = {}, rounds = []) {
+  $("#document-paper").classList.add("a4-paper", "record-paper");
+  $("#document-paper").classList.remove("agreement-paper");
   const parties = Array.isArray(caseState.parties) ? caseState.parties : [];
   const partyNames = parties.map((party) => party.name).filter(Boolean).join("、") || "当事人";
   const staff = splitStaffNames(caseState.created_by);
@@ -412,11 +416,8 @@ function renderRecordDraft(content = {}, caseState = {}, rounds = []) {
   const mediationPlace = content.place || caseState.mediation_place || caseState.location || "杭州市公安局滨江区分局";
   const statements = normalizeRecordStatements(content);
   const shouldRenderGeneratedContent = content.skip_generated_content !== true;
-  const fallbackStatements = shouldRenderGeneratedContent ? rounds.flatMap((round) => round.transcript.map((item) => ({
-    speaker: item.speaker || round.speaker,
-    content: item.text || "",
-  }))).filter((item) => item.speaker && item.content) : [];
-  const recordStatements = shouldRenderGeneratedContent ? (statements.length ? statements : fallbackStatements) : [];
+  // 调解笔录正文只接收大模型归纳后的轮次陈述，避免把实时转写逐句写进正式笔录。
+  const recordStatements = shouldRenderGeneratedContent ? statements : [];
   const statementHtml = recordStatements
     .map((item) => `<p><span>${escapeHTML(item.speaker)}：</span>${escapeHTML(item.content)}</p>`)
     .join("");
@@ -434,9 +435,9 @@ function renderRecordDraft(content = {}, caseState = {}, rounds = []) {
       <section class="record-content">
         ${statementHtml}
         <p><span>主持人：</span>经双方当事人协商，无法达成一致的协议。我们派出所将根据治安管理处罚的有关规定进行行政处罚。</p>
-        <p>以上笔录请你们细阅，如有遗漏或错误，请指正，我们给予更正，如没有错误。</p>
       </section>
       <section class="record-signature-sheet">
+        <p>以上笔录请你们细阅，如有遗漏或错误，请指正，我们给予更正，如没有错误。</p>
         <p>请签字确认（按印）</p>
         <div class="record-sign-row">
           <span>当事人：${escapeHTML(partyNames)}</span>
@@ -452,6 +453,9 @@ function renderRecordDraft(content = {}, caseState = {}, rounds = []) {
 }
 
 function renderDocumentLoading(title = "调解协议书", message = "正在生成协议内容...") {
+  $("#document-paper").classList.add("a4-paper");
+  $("#document-paper").classList.toggle("record-paper", title === "调解笔录");
+  $("#document-paper").classList.toggle("agreement-paper", title !== "调解笔录");
   $("#document-title").textContent = title;
   $("#document-paper").innerHTML = `<div class="document-loading">${escapeHTML(message)}</div>`;
 }
