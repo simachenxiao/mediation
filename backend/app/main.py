@@ -1,4 +1,4 @@
-﻿"""接口说明。"""
+"""接口说明。"""
 
 from __future__ import annotations
 
