@@ -1015,7 +1015,7 @@ async function startRealtimeAsr() {
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
     const audioData = new Uint8Array(analyser.fftSize);
-    const processor = context.createScriptProcessor(4096, 1, 1);
+    const processor = context.createScriptProcessor(2048, 1, 1);
     let stream = null;
     let source;
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });

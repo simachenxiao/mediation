@@ -40,7 +40,6 @@ llm = LLMService()
 asr = get_asr_provider()
 
 TENCENT_PCM_CHUNK_BYTES = 1280
-TENCENT_PCM_CHUNK_INTERVAL_SECONDS = 0.04
 FIXED_DEMAND_TOPICS = ["道歉", "赔偿金额", "履行方式", "后续承诺", "其他"]
 
 
@@ -233,7 +232,6 @@ async def realtime_asr(websocket: WebSocket) -> None:
                     await tencent_ws.send(chunk)
                     audio_stats["upstream_chunks"] += 1
                     audio_stats["upstream_bytes"] += len(chunk)
-                    await asyncio.sleep(TENCENT_PCM_CHUNK_INTERVAL_SECONDS)
                 if flush and audio_buffer:
                     chunk = bytes(audio_buffer)
                     await tencent_ws.send(chunk)
@@ -289,7 +287,7 @@ async def realtime_asr(websocket: WebSocket) -> None:
                                 await send_pcm_to_tencent(b"", flush=True)
                                 await tencent_ws.send(json.dumps({"type": "end"}, ensure_ascii=False))
                             with contextlib.suppress(asyncio.TimeoutError):
-                                await asyncio.wait_for(final_result_received.wait(), timeout=8)
+                                await asyncio.wait_for(final_result_received.wait(), timeout=1)
                             break
             finally:
                 if not forward_task.done():
