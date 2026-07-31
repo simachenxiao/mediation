@@ -1086,15 +1086,18 @@ mark {
 .statement-chat-list .utterance {
   display: grid;
   justify-items: start;
-  align-content: center;
+  align-content: start;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
   width: fit-content;
   min-width: 220px;
   max-width: min(1120px, 92%);
   min-height: 58px;
+  height: auto;
   padding: 10px 16px;
   border-radius: 12px;
   box-shadow: var(--shadow);
+  box-sizing: border-box;
 }
 
 .statement-chat-list .utterance span {
@@ -1104,8 +1107,11 @@ mark {
 
 .statement-chat-list .utterance p {
   margin: 0;
+  width: 100%;
   font-size: 16px;
   line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
   overflow-wrap: anywhere;
 }
 

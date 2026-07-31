@@ -51,7 +51,7 @@ class TencentASRProvider:
         timestamp = int(time.time())
         expired = timestamp + 60 * 30
         voice_id = voice_id or str(uuid4())
-        engine_model_type = self.settings.tencent_asr_engine_model_type
+        engine_model_type = self.settings.tencent_asr_effective_engine_model_type
         if self.settings.tencent_asr_speaker_diarization and "speaker" not in engine_model_type:
             # 开启说话人分离时自动切到支持该能力的模型，避免只改开关忘记换模型。
             engine_model_type = "16k_zh_en_speaker_2.0"
@@ -222,7 +222,4 @@ class TencentASRProvider:
 
 
 def get_asr_provider() -> TencentASRProvider:
-    settings = get_settings()
-    if settings.asr_provider == "tencent":
-        return TencentASRProvider()
-    raise RuntimeError(f"Unsupported ASR provider: {settings.asr_provider}")
+    return TencentASRProvider()

@@ -126,8 +126,6 @@ class LLMService:
         return data["choices"][0]["message"]["content"]
 
     def _ensure_deepseek_available(self) -> None:
-        if self.settings.llm_provider != "deepseek":
-            raise RuntimeError(f"Unsupported LLM provider: {self.settings.llm_provider}")
         if not self.settings.deepseek_api_key:
             raise RuntimeError("DeepSeek API key is missing")
 

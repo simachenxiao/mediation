@@ -528,28 +528,6 @@ async function generateDocumentDraft(key = "agreement") {
   renderAgreementDraft(payload.document?.content || {}, caseState);
 }
 
-function nextSimulationSession(config, sessionKey, roundIndex) {
-  const sequence = Array.isArray(config.realtime_asr_simulation_sequence)
-    ? config.realtime_asr_simulation_sequence
-    : [];
-  let occurrence = 0;
-  for (let index = 0; index < sequence.length; index += 1) {
-    if (sequence[index] !== sessionKey) continue;
-    occurrence += 1;
-    if (occurrence === roundIndex) return sequence[index + 1] || null;
-  }
-  return null;
-}
-
-async function advanceSimulationSession(sessionKey, roundIndex) {
-  const config = await getPublicConfig();
-  if (!config.realtime_asr_simulation) return;
-  const nextSession = nextSimulationSession(config, sessionKey, roundIndex);
-  if (!nextSession || nextSession === appState.currentSession) return;
-  updateSession(nextSession);
-  toast(`已切换到${sessions[nextSession].speaker}下一段模拟会谈`);
-}
-
 function setDemandExtracting(active, message = "诉求提取中") {
   appState.extractingDemand = active;
   const node = $("#demand-extract-modal");
@@ -687,16 +665,27 @@ function normalizeDemandTopic(rawTopic, text = "") {
 }
 
 function mergeDemandItem(items, topic, text) {
-  const cleanText = String(text || "").trim();
-  if (!cleanText) return;
+  const cleanText = String(text || "").trim() || "无";
   const cleanTopic = normalizeDemandTopic(topic, cleanText);
+  if (items[cleanTopic] === "无" && cleanText !== "无") {
+    items[cleanTopic] = cleanText;
+    return;
+  }
   if (!items[cleanTopic]) {
     items[cleanTopic] = cleanText;
     return;
   }
-  if (!items[cleanTopic].includes(cleanText)) {
+  if (cleanText !== "无" && !items[cleanTopic].includes(cleanText)) {
     items[cleanTopic] = `${items[cleanTopic]}；${cleanText}`;
   }
+}
+
+function fillEmptyDemandItems(items) {
+  defaultDemandTopics.forEach((topic) => {
+    const value = String(items[topic] || "").trim();
+    items[topic] = value || "无";
+  });
+  return items;
 }
 
 function normalizeModelList(value) {
@@ -722,7 +711,7 @@ function extractionToDemandItems(extraction) {
       : extraction.attitude.note || extraction.attitude.willingness || "";
     mergeDemandItem(items, "其他", note);
   }
-  return items;
+  return fillEmptyDemandItems(items);
 }
 
 function demandSide(sessionKey) {
@@ -935,6 +924,14 @@ function updateAudioMeter(level = 0, active = false) {
   label.textContent = active ? (normalized < 0.05 ? "收音偏弱" : "收音正常") : "收音待开始";
 }
 
+function renderAsrModeStatus(config = appState.publicConfig || {}) {
+  const status = $("#speaker-state-main");
+  if (!status) return;
+  status.textContent = config.tencent_asr_speaker_diarization
+    ? "转写模式：实时拾音 + 人声分离"
+    : "转写模式：实时拾音";
+}
+
 function stopAudioMeter() {
   if (appState.asr.meterAnimation) {
     window.cancelAnimationFrame(appState.asr.meterAnimation);
@@ -968,7 +965,7 @@ async function startRealtimeAsr() {
   await stopRealtimeAsr(false);
   appState.asr.closing = false;
   const config = await getPublicConfig();
-  const simulationEnabled = Boolean(config.realtime_asr_simulation);
+  renderAsrModeStatus(config);
   const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
   const sessionParam = encodeURIComponent(appState.currentSession);
   const roundParam = encodeURIComponent(appState.roundState[appState.currentSession].index);
@@ -1011,20 +1008,18 @@ async function startRealtimeAsr() {
     socket.addEventListener("error", reject, { once: true });
   });
 
-  if (simulationEnabled) {
-    toast("实时语音模拟已开启");
-    return;
-  }
-
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const context = new AudioContext();
-    const source = context.createMediaStreamSource(stream);
+    await context.resume();
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
     const audioData = new Uint8Array(analyser.fftSize);
     const processor = context.createScriptProcessor(4096, 1, 1);
+    let stream = null;
+    let source;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    source = context.createMediaStreamSource(stream);
 
     // 浏览器采集到的浮点音频转成腾讯云实时 ASR 要求的 16k/16bit/单声道 PCM。
     processor.onaudioprocess = (event) => {
@@ -1076,7 +1071,15 @@ async function stopRealtimeAsr(sendEnd = true) {
       socket.close();
     }
   }
-  Object.assign(appState.asr, { socket: null, stream: null, context: null, source: null, analyser: null, audioData: null, processor: null });
+  Object.assign(appState.asr, {
+    socket: null,
+    stream: null,
+    context: null,
+    source: null,
+    analyser: null,
+    audioData: null,
+    processor: null,
+  });
   window.setTimeout(() => {
     appState.asr.closing = false;
   }, 800);
@@ -1178,7 +1181,7 @@ function renderVoiceSummary(sessionKey) {
   $("#party-gender").textContent = party?.gender || "/";
   $("#party-id").textContent = party?.id_no || "/";
   $("#party-identity").textContent = party?.identity || party?.role || "/";
-  $("#speaker-state-main").textContent = "说话人分离：已关闭";
+  renderAsrModeStatus();
 
   $("#round-current").textContent = `${session.roundLabel} · ${state.running ? "录音中" : (state.stopped ? "已结束" : "待开始")}`;
   const displaySeconds = state.stopped && state.stoppedSeconds !== null ? state.stoppedSeconds : state.seconds;
@@ -1373,11 +1376,11 @@ async function stopCurrentRound() {
   state.stopped = true;
   state.stoppedSeconds = state.seconds;
   state.endedAt = Date.now();
+  setDemandExtracting(true, "诉求提取中");
   await stopRealtimeAsr(true);
   archiveCurrentRound(appState.currentSession);
   renderVoiceSummary(appState.currentSession);
   await generateDemandAfterRound(appState.currentSession);
-  await advanceSimulationSession(stoppedSession, stoppedRoundIndex);
 }
 
 function bindEvents() {
@@ -1502,6 +1505,7 @@ function bindEvents() {
 }
 
 async function init() {
+  await getPublicConfig();
   await getCaseState();
   applyCasePartiesToUi();
   renderAgreementDraft({}, appState.caseState || {});
