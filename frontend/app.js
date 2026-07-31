@@ -198,6 +198,7 @@ async function readJsonResponse(response, fallbackMessage) {
   return payload;
 }
 
+// 拉取后端公共配置，主要用于 ASR 模式、调试开关等页面初始化信息。
 async function getPublicConfig() {
   try {
     const payload = await fetch("/api/config").then((response) => response.json());
@@ -208,6 +209,7 @@ async function getPublicConfig() {
   }
 }
 
+// 拉取当前案件状态，包含当事人、案件基础信息和后续文书生成所需数据。
 async function getCaseState() {
   try {
     const payload = await fetch("/api/state").then((response) => response.json());
@@ -218,6 +220,7 @@ async function getCaseState() {
   }
 }
 
+// 向后端上报实时转写调试信息，便于排查 ASR 链路问题。
 function reportAsrDebug(event, payload = {}) {
   fetch("/api/asr/debug", {
     method: "POST",
@@ -472,6 +475,7 @@ function renderDocumentLoading(title = "调解协议书", message = "正在生�
   $("#document-paper").innerHTML = `<div class="document-loading">${escapeHTML(message)}</div>`;
 }
 
+// 生成调解协议书或调解笔录草稿，统一走后端文书接口。
 async function generateDocumentDraft(key = "agreement") {
   appState.currentDocument = key;
   const docType = key === "record" ? "MEDIATION_RECORD" : "MEDIATION_AGREEMENT";
@@ -961,6 +965,7 @@ function startAudioMeter(analyser, audioData) {
   tick();
 }
 
+// 建立实时转写链路：前端先连后端 WebSocket，再由后端转发到腾讯云 ASR。
 async function startRealtimeAsr() {
   await stopRealtimeAsr(false);
   appState.asr.closing = false;
@@ -969,6 +974,7 @@ async function startRealtimeAsr() {
   const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
   const sessionParam = encodeURIComponent(appState.currentSession);
   const roundParam = encodeURIComponent(appState.roundState[appState.currentSession].index);
+  // 实时转写主通道。
   const socket = new WebSocket(`${wsProtocol}://${window.location.host}/api/asr/realtime?session=${sessionParam}&round=${roundParam}`);
   appState.asr.socket = socket;
 
@@ -1022,6 +1028,7 @@ async function startRealtimeAsr() {
     source = context.createMediaStreamSource(stream);
 
     // 浏览器采集到的浮点音频转成腾讯云实时 ASR 要求的 16k/16bit/单声道 PCM。
+    // 把浏览器采集到的音频降采样并编码成 16k/16bit/单声道 PCM，再按块发给后端。
     processor.onaudioprocess = (event) => {
       const state = appState.roundState[appState.currentSession];
       if (!state.running || socket.readyState !== WebSocket.OPEN) return;
@@ -1044,6 +1051,7 @@ async function startRealtimeAsr() {
   }
 }
 
+// 停止实时转写时，先通知后端结束，再清理麦克风、音频上下文和 WebSocket。
 async function stopRealtimeAsr(sendEnd = true) {
   const { socket, stream, context, source, analyser, processor } = appState.asr;
   appState.asr.closing = true;
@@ -1085,6 +1093,7 @@ async function stopRealtimeAsr(sendEnd = true) {
   }, 800);
 }
 
+// 一轮结束后进入诉求处理：先提取，再在双方都齐备时做一致性分析。
 async function generateDemandAfterRound(sessionKey) {
   const runtime = currentRuntime(sessionKey);
   const transcript = collectCurrentRoundTranscript(sessionKey);
@@ -1101,6 +1110,7 @@ async function generateDemandAfterRound(sessionKey) {
     setDemandExtracting(true, "诉求提取中");
     $("#decision-next-text").textContent = "正在根据本轮会谈提取诉求...";
     const extractStartedAt = performance.now();
+    // 事项提取接口：输入当前轮次转写、已有提取结果和当前侧诉求，输出结构化诉求。
     const extractionResp = await fetch("/api/ai/extract", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1131,6 +1141,7 @@ async function generateDemandAfterRound(sessionKey) {
       if (compareScript) compareScript.textContent = "诉求已回显更新，正在进行一致性判断...";
       try {
         const analyzeStartedAt = performance.now();
+        // 一致性分析接口：把双方最新诉求和当前对照表送给后端，生成一致或待协商结果。
         const analysisResp = await fetch("/api/ai/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
