@@ -179,7 +179,7 @@ function collectCurrentRoundTranscript(sessionKey) {
     .find((round) => round.index === state.index && round.startedAt === state.startedAt);
   const transcript = currentRound?.transcript?.length ? currentRound.transcript : runtime.transcript;
   if (!transcript.length) return "";
-  // 诉求提取只看当前人员本轮对话；历史结论通过 current_extraction/current_demand 传入，避免把另一方内容带入提取。
+  // 诉求提取只看当前人员本轮对话，另带当前侧已有诉求用于保留未被本轮否定的事项。
   return `【${sessions[sessionKey].roundLabel}】\n${transcriptToText(transcript)}`;
 }
 
@@ -705,20 +705,15 @@ function normalizeModelList(value) {
 function extractionToDemandItems(extraction) {
   const items = {};
   const claims = normalizeModelList(extraction?.claims);
-  const concessions = normalizeModelList(extraction?.concessions);
   claims.forEach((item) => {
     mergeDemandItem(items, item.type || item.topic || "诉求", item.description || item.statement || item.content || "");
   });
-  concessions.forEach((item) => {
-    mergeDemandItem(items, item.type || item.topic || "让步/承诺", item.description || item.statement || item.content || "");
-  });
-  if (extraction?.attitude) {
-    const note = typeof extraction.attitude === "string"
-      ? extraction.attitude
-      : extraction.attitude.note || extraction.attitude.willingness || "";
-    mergeDemandItem(items, "其他", note);
-  }
-  return fillEmptyDemandItems(items);
+  return items;
+}
+
+function normalizeChangedTopics(value) {
+  const rawTopics = Array.isArray(value) ? value : (typeof value === "string" && value.trim() ? [value] : []);
+  return [...new Set(rawTopics.map((topic) => normalizeDemandTopic(topic)).filter(Boolean))];
 }
 
 function demandSide(sessionKey) {
@@ -727,12 +722,24 @@ function demandSide(sessionKey) {
 
 function updateDemandStore(sessionKey, extraction) {
   const side = demandSide(sessionKey);
-  if (!side) return;
+  if (!side) return [];
   const existing = appState.demandStore[side] || {};
-  appState.demandStore[side] = {
-    ...existing,
-    ...extractionToDemandItems(extraction),
-  };
+  const extractedItems = extractionToDemandItems(extraction);
+  const declaredTopics = normalizeChangedTopics(extraction?.changed_topics || extraction?.changedTopics);
+  const topicsToApply = declaredTopics.length ? declaredTopics : Object.keys(extractedItems);
+  const nextItems = { ...existing };
+  const changedTopics = [];
+
+  topicsToApply.forEach((topic) => {
+    if (!Object.prototype.hasOwnProperty.call(extractedItems, topic)) return;
+    const nextValue = String(extractedItems[topic] || "").trim() || "无";
+    const prevValue = String(existing[topic] || "").trim();
+    if (prevValue !== nextValue) changedTopics.push(topic);
+    nextItems[topic] = nextValue;
+  });
+
+  appState.demandStore[side] = nextItems;
+  return changedTopics;
 }
 
 function latestExtraction(sessionKey) {
@@ -794,19 +801,41 @@ function buildDemandRowsPreservingStatus(snapshot = collectDemandStatusSnapshot(
   return applyDemandStatusSnapshot(buildDemandRowsFromStore(), snapshot);
 }
 
-function normalizeClaims(extraction) {
-  const claims = normalizeModelList(extraction?.claims);
-  const concessions = normalizeModelList(extraction?.concessions);
-  return [
-    ...claims.map((item) => ({
-      topic: item.type || "诉求",
-      text: item.description || item.statement || item.content || "",
-    })),
-    ...concessions.map((item) => ({
-      topic: "让步/承诺",
-      text: item.description || item.statement || item.content || "",
-    })),
-  ].filter((item) => item.text);
+function applyDemandOverrides(rows, overrides = {}) {
+  return rows.map(([topic, aText, bText, result, color]) => {
+    const override = overrides[topic];
+    if (!override) return [topic, aText, bText, result, color];
+    return [topic, aText, bText, override.result, override.color];
+  });
+}
+
+function analysisItemTopic(item, fallbackTopic, fallbackText = "") {
+  return normalizeDemandTopic(
+    item?.topic || fallbackTopic,
+    fallbackText || item?.detail || item?.partyA || item?.partyB || item?.content || item?.description || item?.statement || "",
+  );
+}
+
+function mergeAnalysisResult(previous, next, changedTopics = []) {
+  if (!previous || !changedTopics.length) return next;
+  const changedSet = new Set(changedTopics);
+  const keepUnchanged = (items, fallbackTopic) => normalizeModelList(items)
+    .filter((item) => !changedSet.has(analysisItemTopic(item, fallbackTopic)));
+
+  return {
+    ...previous,
+    ...next,
+    commonGrounds: [
+      ...keepUnchanged(previous.commonGrounds, "一致事项"),
+      ...normalizeModelList(next.commonGrounds),
+    ],
+    disputePoints: [
+      ...keepUnchanged(previous.disputePoints, "分歧事项"),
+      ...normalizeModelList(next.disputePoints),
+    ],
+    changed_topics: changedTopics,
+    feasibility: next.feasibility || previous.feasibility,
+  };
 }
 
 function renderDemandRows(rows, summary = "") {
@@ -825,17 +854,23 @@ function renderSingleSideDemand(sessionKey, extraction) {
   renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), "已根据本轮会谈更新诉求，等待另一方会谈后形成对照。");
 }
 
-function renderAnalysisDemand(analysis) {
+function renderAnalysisDemand(analysis, statusSnapshot = collectDemandStatusSnapshot()) {
   const overrides = {};
   normalizeModelList(analysis.commonGrounds).forEach((item) => {
-    const topic = normalizeDemandTopic(item.topic || "一致事项", item.detail || item.partyA || item.partyB || item.content || item.description || item.statement || "");
+    const topic = analysisItemTopic(item, "一致事项");
     overrides[topic] = { result: "一致", color: "green" };
   });
   normalizeModelList(analysis.disputePoints).forEach((item) => {
-    const topic = normalizeDemandTopic(item.topic || "分歧事项", `${item.partyA || ""} ${item.partyB || ""} ${item.content || ""} ${item.description || ""} ${item.statement || ""}`);
+    const topic = analysisItemTopic(item, "分歧事项", `${item.partyA || ""} ${item.partyB || ""} ${item.content || ""} ${item.description || ""} ${item.statement || ""}`);
     overrides[topic] = { result: "待协商", color: "amber" };
   });
-  const rows = buildDemandRowsFromStore(overrides);
+  const changedTopics = normalizeChangedTopics(analysis.changed_topics || analysis.changedTopics);
+  const defaultRowsByTopic = Object.fromEntries(buildDemandRowsFromStore().map((row) => [row[0], row]));
+  const baseRows = buildDemandRowsPreservingStatus(statusSnapshot).map((row) => {
+    const topic = row[0];
+    return changedTopics.includes(topic) && defaultRowsByTopic[topic] ? defaultRowsByTopic[topic] : row;
+  });
+  const rows = applyDemandOverrides(baseRows, overrides);
   const summary = typeof analysis.feasibility === "string"
     ? analysis.feasibility
     : analysis.feasibility?.suggestedFocus || analysis.feasibility?.reasoning || "双方诉求对照已生成。";
@@ -1123,14 +1158,13 @@ async function generateDemandAfterRound(sessionKey) {
     setDemandExtracting(true, "诉求提取中");
     $("#decision-next-text").textContent = "正在根据本轮会谈提取诉求...";
     const extractStartedAt = performance.now();
-    // 事项提取接口：输入当前轮次转写、已有提取结果和当前侧诉求，输出结构化诉求。
+    // 事项提取接口：只输入当前轮次转写和当前侧已有诉求，避免把历史结构化结果重复塞给大模型。
     const extractionResp = await fetch("/api/ai/extract", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_key: sessionKey,
         transcript,
-        current_extraction: latestExtraction(sessionKey) || {},
         current_demand: side ? appState.demandStore[side] || {} : {},
       }),
     });
@@ -1138,43 +1172,48 @@ async function generateDemandAfterRound(sessionKey) {
     console.info("诉求提取耗时", Math.round(performance.now() - extractStartedAt), "ms", extractionPayload._meta || {});
     runtime.extraction = extractionPayload;
     extractionCompleted = true;
-    appState.analysisDirty = true;
-    updateDemandStore(sessionKey, runtime.extraction);
+    const changedTopics = updateDemandStore(sessionKey, runtime.extraction);
+    runtime.extraction.changed_topics = changedTopics;
+    appState.analysisDirty = changedTopics.length > 0;
     archiveCurrentRound(sessionKey);
     setDemandExtracting(false);
-    renderPendingAnalysisDemand("诉求已根据本轮会谈更新，等待一致性分析。", statusSnapshot);
+    renderPendingAnalysisDemand(
+      changedTopics.length ? "诉求已根据本轮会谈更新，等待一致性分析。" : "本轮未识别到诉求变化，已保留原诉求对照。",
+      statusSnapshot,
+    );
     await waitNextPaint();
 
     const aExtract = latestExtraction("a");
     const bExtract = latestExtraction("b");
-    if (aExtract && bExtract) {
+    if (aExtract && bExtract && changedTopics.length) {
       setAnalysisAnalyzing(true, "一致性分析中");
       $("#decision-next-text").textContent = "诉求已提取，正在进行一致性判断...";
       const compareScript = $("#compare-joint-script");
       if (compareScript) compareScript.textContent = "诉求已回显更新，正在进行一致性判断...";
       try {
         const analyzeStartedAt = performance.now();
-        // 一致性分析接口：把双方最新诉求和当前对照表送给后端，生成一致或待协商结果。
+        // 一致性分析接口：只传当前诉求对照表，后端会先用代码处理确定项，再把需要语义判断的行交给大模型。
         const analysisResp = await fetch("/api/ai/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            session_a: aExtract,
-            session_b: bExtract,
-            demand_rows: buildDemandRowsFromStore(),
-            demand_a: appState.demandStore.a,
-            demand_b: appState.demandStore.b,
+            demand_rows: buildDemandRowsFromStore().filter(([topic]) => changedTopics.includes(topic)),
           }),
         });
-        appState.currentAnalysis = await readJsonResponse(analysisResp, "一致性判断接口失败");
+        const analysisPayload = await readJsonResponse(analysisResp, "一致性判断接口失败");
+        analysisPayload.changed_topics = changedTopics;
+        appState.currentAnalysis = mergeAnalysisResult(appState.currentAnalysis, analysisPayload, changedTopics);
         console.info("一致性分析耗时", Math.round(performance.now() - analyzeStartedAt), "ms", appState.currentAnalysis._meta || {});
         appState.analysisDirty = false;
-        renderAnalysisDemand(appState.currentAnalysis);
+        renderAnalysisDemand(appState.currentAnalysis, statusSnapshot);
       } finally {
         setAnalysisAnalyzing(false);
       }
     } else {
-      renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), "已根据本轮会谈更新当前人员诉求，等待另一方会谈后形成对照。");
+      const message = changedTopics.length
+        ? "已根据本轮会谈更新当前人员诉求，等待另一方会谈后形成对照。"
+        : "本轮未识别到诉求变化，诉求对照保持不变。";
+      renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), message);
     }
     toast("已根据本轮对话生成诉求");
   } catch (error) {

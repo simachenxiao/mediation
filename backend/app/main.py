@@ -46,15 +46,10 @@ FIXED_DEMAND_TOPICS = ["道歉", "赔偿金额", "履行方式", "后续承诺",
 class ExtractRequest(BaseModel):
     session_key: str
     transcript: str
-    current_extraction: dict[str, Any] | None = None
     current_demand: dict[str, Any] | None = None
 
 
 class AnalyzeRequest(BaseModel):
-    session_a: dict[str, Any]
-    session_b: dict[str, Any]
-    demand_a: dict[str, Any] | None = None
-    demand_b: dict[str, Any] | None = None
     demand_rows: list[list[Any]] | None = None
 
 
@@ -102,10 +97,37 @@ def _normalize_claim_item(item: Any) -> dict[str, Any]:
     return normalized
 
 
-def normalize_extraction_result(result: dict[str, Any]) -> dict[str, Any]:
-    """兜底处理大模型未按要求返回“无”的诉求事项。"""
+def _clean_demand_value(value: Any) -> str:
+    """统一诉求文本，方便判断是否已有内容或是否发生变化。"""
+    return str(value or "").strip()
+
+
+def _has_initialized_demand(current_demand: dict[str, Any] | None) -> bool:
+    """当前方诉求表只要已有任一事项，就按增量更新处理。"""
+    return any(_clean_demand_value(value) for value in (current_demand or {}).values())
+
+
+def _same_demand_value(left: Any, right: Any) -> bool:
+    """忽略空白差异比较诉求内容。"""
+    return "".join(_clean_demand_value(left).split()) == "".join(_clean_demand_value(right).split())
+
+
+def _extract_changed_topics(result: dict[str, Any]) -> set[str]:
+    """兼容模型返回 changed_topics 或 changedTopics。"""
+    raw_topics = result.get("changed_topics") or result.get("changedTopics") or []
+    if isinstance(raw_topics, str):
+        raw_topics = [raw_topics]
+    if not isinstance(raw_topics, list):
+        return set()
+    return {_normalize_demand_topic(topic) for topic in raw_topics if str(topic or "").strip()}
+
+
+def normalize_extraction_result(result: dict[str, Any], current_demand: dict[str, Any] | None = None) -> dict[str, Any]:
+    """兜底处理模型输出，并标记本轮真正变动的诉求事项。"""
+    first_extract = not _has_initialized_demand(current_demand)
     if not isinstance(result, dict):
-        return {"facts": [], "claims": [{"topic": topic, "content": "无"} for topic in FIXED_DEMAND_TOPICS], "concessions": [], "attitude": {}}
+        claims = [{"topic": topic, "content": "无"} for topic in FIXED_DEMAND_TOPICS] if first_extract else []
+        return {"facts": [], "claims": claims, "changed_topics": [item["topic"] for item in claims], "concessions": [], "attitude": {}}
 
     normalized = dict(result)
     raw_claims = normalized.get("claims")
@@ -122,14 +144,79 @@ def normalize_extraction_result(result: dict[str, Any]) -> dict[str, Any]:
         if topic not in by_topic or by_topic[topic].get("content") == "无":
             by_topic[topic] = item
 
-    normalized["claims"] = [
-        by_topic.get(topic, {"topic": topic, "content": "无"})
-        for topic in FIXED_DEMAND_TOPICS
-    ]
+    explicit_changed_topics = _extract_changed_topics(normalized)
+    if first_extract:
+        normalized["claims"] = [
+            by_topic.get(topic, {"topic": topic, "content": "无"})
+            for topic in FIXED_DEMAND_TOPICS
+        ]
+        changed_topics = FIXED_DEMAND_TOPICS
+    else:
+        changed_topics = []
+        normalized_claims = []
+        for topic, item in by_topic.items():
+            content = item.get("content", "无")
+            if explicit_changed_topics and topic not in explicit_changed_topics:
+                continue
+            if _same_demand_value(current_demand.get(topic), content):
+                continue
+            normalized_claims.append(item)
+            changed_topics.append(topic)
+        normalized["claims"] = normalized_claims
+    normalized["changed_topics"] = changed_topics
     normalized.setdefault("facts", [])
     normalized.setdefault("concessions", [])
     normalized.setdefault("attitude", {})
     return normalized
+
+
+def normalize_analysis_rows(rows: list[Any] | None) -> list[dict[str, str]]:
+    """把前端表格行压成大模型需要的最小结构：事项、甲方诉求、乙方诉求。"""
+    normalized: list[dict[str, str]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            topic = str(row.get("topic") or "").strip()
+            party_a = str(row.get("party_a") or row.get("partyA") or row.get("a") or "").strip()
+            party_b = str(row.get("party_b") or row.get("partyB") or row.get("b") or "").strip()
+        elif isinstance(row, (list, tuple)) and len(row) >= 3:
+            topic = str(row[0] or "").strip()
+            party_a = str(row[1] or "").strip()
+            party_b = str(row[2] or "").strip()
+        else:
+            continue
+        topic = _normalize_demand_topic(topic, f"{party_a} {party_b}")
+        normalized.append({"topic": topic, "partyA": party_a, "partyB": party_b})
+    return normalized
+
+
+def same_demand_text(left: str, right: str) -> bool:
+    """完全确定的一致项直接由代码判断，减少不必要的大模型调用。"""
+    return "".join(left.split()) == "".join(right.split())
+
+
+def normalize_model_items(value: Any) -> list[dict[str, Any]]:
+    """兼容模型把数组项返回成字符串或单个对象的情况。"""
+    if isinstance(value, list):
+        raw_items = value
+    elif value:
+        raw_items = [value]
+    else:
+        raw_items = []
+
+    items: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            item = {"topic": _normalize_demand_topic("", item), "content": item}
+        elif not isinstance(item, dict):
+            continue
+        else:
+            item = dict(item)
+            item["topic"] = _normalize_demand_topic(
+                item.get("topic") or "",
+                f"{item.get('partyA') or ''} {item.get('partyB') or ''} {item.get('content') or ''}",
+            )
+        items.append(item)
+    return items
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -329,27 +416,24 @@ def add_utterance(session_key: str, req: UtteranceRequest) -> dict[str, Any]:
 def extract(req: ExtractRequest) -> dict[str, Any]:
     """接口说明。"""
     started_at = time.perf_counter()
-    # 提取阶段只传当前当事人上下文，避免双方诉求相互污染。
-    case_context = CASE_STATE.to_dict()
-    current_session = case_context.get("sessions", {}).get(req.session_key, {})
-    case_context["sessions"] = {
-        req.session_key: {
-            "type": current_session.get("type", ""),
-            "speaker": current_session.get("speaker", ""),
-        }
+    # 提取阶段只给当前当事人和本方已有诉求，减少上下文长度，也避免双方信息互相污染。
+    session = CASE_STATE.sessions.get(req.session_key)
+    party = next((item for item in CASE_STATE.parties if item.name == (session.speaker if session else "")), None)
+    party_context = {
+        "sessionKey": req.session_key,
+        "sessionType": session.type if session else "",
+        "speaker": session.speaker if session else "",
+        "partyRole": party.role if party else "",
     }
-    case_context["audit_log"] = []
     try:
         result = llm.extract(
             req.transcript,
-            case_context,
-            current_extraction=req.current_extraction or {},
+            party_context,
             current_demand=req.current_demand or {},
         )
-        result = normalize_extraction_result(result)
+        result = normalize_extraction_result(result, req.current_demand or {})
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    session = CASE_STATE.sessions.get(req.session_key)
     if session:
         session.transcript_text = req.transcript
         session.extraction = result
@@ -362,19 +446,40 @@ def extract(req: ExtractRequest) -> dict[str, Any]:
 def analyze(req: AnalyzeRequest) -> dict[str, Any]:
     """接口说明。"""
     started_at = time.perf_counter()
-    try:
-        result = llm.analyze(
-            req.session_a,
-            req.session_b,
-            CASE_STATE.to_dict(),
-            demand_a=req.demand_a or {},
-            demand_b=req.demand_b or {},
-            demand_rows=req.demand_rows or [],
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    rows = normalize_analysis_rows(req.demand_rows)
+    common_ground = []
+    semantic_rows = []
+    for row in rows:
+        party_a = row["partyA"].strip()
+        party_b = row["partyB"].strip()
+        if not party_a or not party_b:
+            continue
+        if same_demand_text(party_a, party_b):
+            common_ground.append(row)
+        else:
+            semantic_rows.append(row)
+
+    if semantic_rows:
+        try:
+            result = llm.analyze(semantic_rows)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        result["commonGrounds"] = common_ground + normalize_model_items(result.get("commonGrounds"))
+        result["disputePoints"] = normalize_model_items(result.get("disputePoints"))
+        result.setdefault("feasibility", {"suggestedFocus": "双方诉求对照已生成。"})
+    else:
+        result = {
+            "commonGrounds": common_ground,
+            "disputePoints": [],
+            "feasibility": {"suggestedFocus": "双方诉求对照已生成。"},
+        }
     audit("ai", "analyze", CASE_STATE.id, "generated analysis")
-    result["_meta"] = {"elapsed_ms": round((time.perf_counter() - started_at) * 1000)}
+    result["_meta"] = {
+        "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
+        "semantic_rows": len(semantic_rows),
+        "fast_common_rows": len(common_ground),
+    }
+    result["changed_topics"] = [row["topic"] for row in rows]
     return result
 
 
