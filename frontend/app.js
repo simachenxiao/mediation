@@ -47,9 +47,9 @@ const appState = {
   },
   // 运行期数据只存用户本次采集到的内容。
   sessionRuntime: {
-    a: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0 },
-    b: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0 },
-    joint: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0 },
+    a: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0, asrSegmentIndex: 0 },
+    b: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0, asrSegmentIndex: 0 },
+    joint: { transcript: [], extraction: null, speakerMeta: {}, speakerCount: 0, asrSegmentIndex: 0 },
   },
   roundArchive: {
     a: [],
@@ -70,6 +70,8 @@ const appState = {
     closing: false,
     reconnectAttempts: 0,
     reconnectTimer: null,
+    sessionKey: null,
+    segmentId: 0,
   },
   roundState: {
     a: { index: 1, running: false, stopped: false, seconds: 0, stoppedSeconds: null, startedAt: null, endedAt: null },
@@ -579,6 +581,7 @@ function resetRuntime(sessionKey) {
     extraction: null,
     speakerMeta: {},
     speakerCount: 0,
+    asrSegmentIndex: 0,
   };
 }
 
@@ -843,16 +846,17 @@ function renderPendingAnalysisDemand(message = "诉求已更新，等待一致�
   renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), message);
 }
 
-function appendAsrSentence(payload) {
+function appendAsrSentence(payload, sessionKey = appState.currentSession, segmentId = appState.asr.segmentId || 0) {
   const rawText = typeof payload.text === "string"
     ? payload.text
     : payload.text?.voice_text_str || payload.text?.sentence || payload.text?.text || "";
   const text = rawText.trim();
   if (!text) return;
 
-  const sessionKey = appState.currentSession;
   const runtime = currentRuntime(sessionKey);
-  const id = payload.sentence_id ?? `sentence-${Date.now()}-${runtime.transcript.length}`;
+  const state = appState.roundState[sessionKey];
+  const sentenceId = payload.sentence_id ?? `local-${Date.now()}-${runtime.transcript.length}`;
+  const id = `${sessionKey}-${state.index}-${state.startedAt || "draft"}-${segmentId}-${sentenceId}`;
   const existing = runtime.transcript.find((item) => item.id === id);
   const speakerMeta = resolveSpeakerMeta(sessionKey, payload.speaker_id);
   const speaker = payload.speaker || speakerMeta.label;
@@ -966,14 +970,20 @@ function startAudioMeter(analyser, audioData) {
 }
 
 // 建立实时转写链路：前端先连后端 WebSocket，再由后端转发到腾讯云 ASR。
-async function startRealtimeAsr() {
+// sessionKey 固定为开始录音时的会谈对象，避免异步回调期间切换人员导致转写写错列。
+async function startRealtimeAsr(sessionKey = appState.currentSession) {
   await stopRealtimeAsr(false);
   appState.asr.closing = false;
+  const runtime = currentRuntime(sessionKey);
+  const segmentId = (runtime.asrSegmentIndex || 0) + 1;
+  runtime.asrSegmentIndex = segmentId;
+  appState.asr.sessionKey = sessionKey;
+  appState.asr.segmentId = segmentId;
   const config = await getPublicConfig();
   renderAsrModeStatus(config);
   const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const sessionParam = encodeURIComponent(appState.currentSession);
-  const roundParam = encodeURIComponent(appState.roundState[appState.currentSession].index);
+  const sessionParam = encodeURIComponent(sessionKey);
+  const roundParam = encodeURIComponent(appState.roundState[sessionKey].index);
   // 实时转写主通道。
   const socket = new WebSocket(`${wsProtocol}://${window.location.host}/api/asr/realtime?session=${sessionParam}&round=${roundParam}`);
   appState.asr.socket = socket;
@@ -982,17 +992,17 @@ async function startRealtimeAsr() {
     const payload = JSON.parse(event.data);
     if (payload.type === "sentence") {
       appState.asr.reconnectAttempts = 0;
-      appendAsrSentence(payload);
+      appendAsrSentence(payload, sessionKey, segmentId);
     }
     if (payload.type === "error") reportAsrDebug("browser_error", { message: payload.message || "", code: payload.code || 0 });
     if (payload.type === "error" && !appState.asr.closing) handleAsrFailure(payload.message || "服务连接异常");
   });
 
   socket.addEventListener("close", () => {
-    const state = appState.roundState[appState.currentSession];
+    const state = appState.roundState[sessionKey];
     if (appState.asr.closing || !state.running || appState.asr.socket !== socket) return;
     if (appState.asr.reconnectAttempts >= 3) {
-      const hasTranscript = currentRuntime(appState.currentSession).transcript.length > 0;
+      const hasTranscript = currentRuntime(sessionKey).transcript.length > 0;
       state.running = false;
       stopRealtimeAsr(false).finally(() => {
         renderVoiceSummary(appState.currentSession);
@@ -1003,8 +1013,8 @@ async function startRealtimeAsr() {
     appState.asr.reconnectAttempts += 1;
     toast("实时转写连接中断，正在重连");
     appState.asr.reconnectTimer = window.setTimeout(() => {
-      if (appState.roundState[appState.currentSession].running && appState.asr.socket === socket) {
-        startRealtimeAsr().catch(() => toast("实时转写重连失败，请重新开始"));
+      if (appState.roundState[sessionKey].running && appState.asr.socket === socket) {
+        startRealtimeAsr(sessionKey).catch(() => toast("实时转写重连失败，请重新开始"));
       }
     }, 900);
   });
@@ -1030,7 +1040,7 @@ async function startRealtimeAsr() {
     // 浏览器采集到的浮点音频转成腾讯云实时 ASR 要求的 16k/16bit/单声道 PCM。
     // 把浏览器采集到的音频降采样并编码成 16k/16bit/单声道 PCM，再按块发给后端。
     processor.onaudioprocess = (event) => {
-      const state = appState.roundState[appState.currentSession];
+      const state = appState.roundState[sessionKey];
       if (!state.running || socket.readyState !== WebSocket.OPEN) return;
       const channel = event.inputBuffer.getChannelData(0);
       const pcm = encodePCM16(downsampleBuffer(channel, context.sampleRate, 16000));
@@ -1087,6 +1097,8 @@ async function stopRealtimeAsr(sendEnd = true) {
     analyser: null,
     audioData: null,
     processor: null,
+    sessionKey: null,
+    segmentId: 0,
   });
   window.setTimeout(() => {
     appState.asr.closing = false;
@@ -1099,6 +1111,7 @@ async function generateDemandAfterRound(sessionKey) {
   const transcript = collectCurrentRoundTranscript(sessionKey);
   const statusSnapshot = collectDemandStatusSnapshot();
   if (!transcript.trim()) {
+    setDemandExtracting(false);
     renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), "本轮还没有转写内容，诉求对照保持待采集状态。");
     toast("本轮还没有转写内容，暂不生成诉求");
     return;
@@ -1187,6 +1200,9 @@ function renderVoiceSummary(sessionKey) {
   const session = sessions[sessionKey];
   const state = appState.roundState[sessionKey];
   const party = getPartyBySession(sessionKey);
+  const paused = Boolean(state.startedAt && !state.running && !state.stopped);
+  const roundStatus = state.running ? "录音中" : (state.stopped ? "已结束" : (paused ? "已暂停" : "待开始"));
+  const toggleLabel = state.running ? "暂停" : (state.stopped ? "开始新轮" : (paused ? "继续本轮" : "开始"));
 
   $("#party-name").textContent = party?.name || session.speaker || "/";
   $("#party-gender").textContent = party?.gender || "/";
@@ -1194,18 +1210,24 @@ function renderVoiceSummary(sessionKey) {
   $("#party-identity").textContent = party?.identity || party?.role || "/";
   renderAsrModeStatus();
 
-  $("#round-current").textContent = `${session.roundLabel} · ${state.running ? "录音中" : (state.stopped ? "已结束" : "待开始")}`;
+  $("#round-current").textContent = `${session.roundLabel} · ${roundStatus}`;
   const displaySeconds = state.stopped && state.stoppedSeconds !== null ? state.stoppedSeconds : state.seconds;
   $("#session-timer").textContent = formatTime(displaySeconds);
-  $("#record-status").textContent = state.stopped ? "已结束" : (state.running ? "录音中" : "待开始");
-  $("#record-toggle-label").textContent = state.running ? "暂停" : (state.stopped ? "开始新轮" : "开始本轮");
+  $("#record-status").textContent = roundStatus;
+  $("#record-toggle-label").textContent = toggleLabel;
   const recordButton = $('[data-control="pause"]');
   if (recordButton) {
     recordButton.classList.toggle("active", state.running);
-    recordButton.setAttribute("aria-label", state.running ? "暂停本轮" : "开始本轮");
+    recordButton.setAttribute("aria-label", toggleLabel);
     recordButton.innerHTML = state.running
       ? '<i data-lucide="pause"></i><span id="record-toggle-label">暂停</span>'
-      : `<i data-lucide="play"></i><span id="record-toggle-label">${state.stopped ? "开始新轮" : "开始本轮"}</span>`;
+      : `<i data-lucide="play"></i><span id="record-toggle-label">${toggleLabel}</span>`;
+  }
+  const stopButton = $('[data-control="stop"]');
+  if (stopButton) {
+    const stopDisabled = appState.extractingDemand || !state.startedAt || state.stopped;
+    stopButton.disabled = stopDisabled;
+    stopButton.setAttribute("aria-disabled", String(stopDisabled));
   }
   if (!state.running) {
     updateAudioMeter(0, false);
@@ -1325,8 +1347,9 @@ function clearSignaturePad() {
 }
 
 async function toggleCurrentRound() {
-  const state = appState.roundState[appState.currentSession];
-  const session = sessions[appState.currentSession];
+  const sessionKey = appState.currentSession;
+  const state = appState.roundState[sessionKey];
+  const session = sessions[sessionKey];
   if (appState.extractingDemand) {
     toast("诉求提取中，请稍候");
     return;
@@ -1341,7 +1364,7 @@ async function toggleCurrentRound() {
       state.index += 1;
       state.seconds = 0;
       state.stoppedSeconds = null;
-      resetRuntime(appState.currentSession);
+      resetRuntime(sessionKey);
       // 同一当事人进入新一轮时，旧一致性结论先标记为待刷新；状态列保持当前展示，等新分析完成后统一更新。
       appState.analysisDirty = true;
       renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), "已保留前序诉求，等待本轮停止后继续更新。");
@@ -1352,10 +1375,10 @@ async function toggleCurrentRound() {
     }
     state.running = true;
     state.stopped = false;
-    session.roundLabel = buildRoundLabel(appState.currentSession, state.startedAt);
+    session.roundLabel = buildRoundLabel(sessionKey, state.startedAt);
     renderVoiceSummary(appState.currentSession);
     try {
-      await startRealtimeAsr();
+      await startRealtimeAsr(sessionKey);
       toast(`已开始第 ${state.index} 轮实时语音转写`);
     } catch (error) {
       state.running = false;
@@ -1368,9 +1391,8 @@ async function toggleCurrentRound() {
 }
 
 async function stopCurrentRound() {
-  const state = appState.roundState[appState.currentSession];
   const stoppedSession = appState.currentSession;
-  const stoppedRoundIndex = state.index;
+  const state = appState.roundState[stoppedSession];
   if (appState.extractingDemand) {
     toast("诉求提取中，请稍候");
     return;
@@ -1387,11 +1409,17 @@ async function stopCurrentRound() {
   state.stopped = true;
   state.stoppedSeconds = state.seconds;
   state.endedAt = Date.now();
-  setDemandExtracting(true, "诉求提取中");
   await stopRealtimeAsr(true);
-  archiveCurrentRound(appState.currentSession);
+  archiveCurrentRound(stoppedSession);
   renderVoiceSummary(appState.currentSession);
-  await generateDemandAfterRound(appState.currentSession);
+  if (!collectCurrentRoundTranscript(stoppedSession).trim()) {
+    setDemandExtracting(false);
+    const statusSnapshot = collectDemandStatusSnapshot();
+    renderDemandRows(buildDemandRowsPreservingStatus(statusSnapshot), "本轮没有转写内容，已跳过诉求提取。");
+    toast("本轮没有转写内容，已跳过诉求提取");
+    return;
+  }
+  await generateDemandAfterRound(stoppedSession);
 }
 
 function bindEvents() {
